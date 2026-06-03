@@ -2,7 +2,7 @@
 
 using QuadGK
 using Random, Distributions, DataFrames, SpecialFunctions, Revise, StatsPlots, StatsBase, Plots
-include("new_functions.jl")
+include("all_functions.jl")
 
 theta2_true = 0.25
 

@@ -10,7 +10,7 @@ include("all_functions.jl")
 theta2_true = 0.5
 #–– MCMC settings and data prep ––
 Random.seed!(1234)                # for reproducibility
-N0      = 2000                    # number of individuals
+N0      = 1000                    # number of individuals
 Tmax    = 30                      # days
 theta   = 0.25                     # initial θ for dust sim
 xi      = log(2)/7 

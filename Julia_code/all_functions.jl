@@ -1,95 +1,3 @@
-function simulate_lambda_avg(K::Int=5; kwargs...)
-    λ_acc = simulate_lambda(; kwargs...)
-    for _ in 2:K
-        λ_acc .+= simulate_lambda(; kwargs...)
-    end
-    return λ_acc ./ K
-end
-
-function changepoint_mcmc_new(
-    X_obs::Vector{<:Integer};
-    N::Int, 
-    Tmax::Int,
-    xi::Float64=log(2)/7,
-    breaks::Int=2,
-    n_iter::Int=5000,
-    burn_in::Int=1000,
-    thin::Int=1,
-    prop_sd::NamedTuple=(theta1=0.05, theta2=0.05, tau=2.0)
-)
-    #M = length(X_obs)
-
-    # allocate storage
-    n_samps = (n_iter - burn_in) ÷ thin
-    samples = Array{Float64}(undef, n_samps, 3)  # columns: θ₁, θ₂, τ
-    logalphas = Array{Float64}(undef, n_samps)   # stores log acceptance ratios
-
-    # initialize
-    θ1_cur = rand()                        # ∼Uniform(0,1)
-    θ2_cur = rand(Uniform(θ1_cur, 1.0))    # ∼Uniform(θ1,1)
-    τ_cur  = Tmax ÷ 2             
-
-    counter = 1
-    accept_count = 0
-    K_avg = 10
-
-    # initial log‐lik & log‐prior
-    # --- Before the loop: initialize once ---
-    λ_cur        = simulate_lambda_avg(N=N, Tmax=Tmax, theta1=θ1_cur,
-                                    theta2=θ2_cur, tau=τ_cur, xi=xi, breaks=breaks)
-    loglik_cur   = loglik_binom_poisson_sum(X_obs, λ_cur, xi; δt=breaks)
-    logprior_cur = log_prior(θ1_cur, θ2_cur, τ_cur; Tmax=Tmax)
-
-    for iter in 1:n_iter
-
-        # --- Propose ---
-        θ1_prop = rand(Normal(θ1_cur, prop_sd.theta1))
-        θ2_prop = rand(Normal(θ2_cur, prop_sd.theta2))
-        τ_prop  = τ_cur + rand(-3:3)   # symmetric discrete proposal
-
-        logα = -Inf
-
-        valid = (0.0 < θ1_prop < 1.0) &&
-                (θ1_prop < θ2_prop < 1.0) &&
-                (1 <= τ_prop <= Tmax - 1)
-
-        if valid
-            # Simulate λ only for the PROPOSAL — never for current
-            λ_prop = simulate_lambda(N=N, Tmax=Tmax, theta1=θ1_prop,
-                                    theta2=θ2_prop, tau=τ_prop, xi=xi, breaks=breaks)
-
-            if !any(!isfinite, λ_prop) && !any(≤(0.0), λ_prop)
-                loglik_prop   = loglik_binom_poisson_sum(X_obs, λ_prop, xi; δt=breaks)
-                logprior_prop = log_prior(θ1_prop, θ2_prop, τ_prop; Tmax=Tmax)
-
-                logα = (loglik_prop + logprior_prop) -
-                    (loglik_cur  + logprior_cur)
-            end
-        end
-
-        # --- Accept/Reject ---
-        if log(rand()) < logα
-            accept_count += 1
-            θ1_cur, θ2_cur, τ_cur   = θ1_prop, θ2_prop, τ_prop
-            λ_cur                    = λ_prop        # ← freeze accepted λ draw
-            loglik_cur, logprior_cur = loglik_prop, logprior_prop
-        end
-        # On rejection: θ_cur, λ_cur, loglik_cur all stay as-is — no recomputation
-
-        # --- Store ---
-        if iter > burn_in && ((iter - burn_in) % thin == 0)
-            samples[counter, :] = [θ1_cur, θ2_cur, Float64(τ_cur)]
-            logalphas[counter]   = logα
-            counter += 1
-        end
-    end
-
-    accepted_rate = accept_count / n_iter
-    return (samples = samples[1:(counter - 1), :],
-        logalphas = logalphas[1:(counter - 1)],
-        accepted_rate = accepted_rate)
-end
-
 """
     changepoint_mcmc(X_obs;
         N::Int=1000, 
@@ -676,7 +584,7 @@ function simulate_infection_process(
     current_state = fill(0, N)
     recover_time  = fill(typemax(Int), N)
 
-    initial_infected = 10
+    initial_infected = 5
     ids0 = randperm(N)[1:initial_infected]
     states[ids0, 1] .= 1
     current_state[ids0] .= 1
@@ -739,4 +647,531 @@ function simulate_infection_process(
     end
 
     return (states=states, history=history)
+end
+
+
+"""
+    posterior_summary(posterior; true_t_star=nothing, tolerance=2)
+
+Summarize the changepoint MCMC output from `changepoint_mcmc`.
+"""
+function posterior_summary(
+    posterior;
+    true_t_star::Union{Nothing,Int}=nothing,
+    tolerance::Int=2,
+    min_effect::Float64=0.025,
+)
+    samples = posterior.samples
+
+    if size(samples, 1) == 0
+        return (
+            theta1_median = missing,
+            theta2_median = missing,
+            theta_diff_median = missing,
+            tau_median = missing,
+            tau_map = missing,
+            tau_q025 = missing,
+            tau_q975 = missing,
+            p_positive_effect = missing,
+            p_large_effect = missing,
+            p_tau_near_truth = missing,
+            accepted_rate = posterior.accepted_rate,
+        )
+    end
+
+    theta1 = samples[:, 1]
+    theta2 = samples[:, 2]
+    tau = Int.(round.(samples[:, 3]))
+    theta_diff = theta2 .- theta1
+
+    p_tau_near_truth = true_t_star === nothing ? missing :
+        mean(abs.(tau .- true_t_star) .<= tolerance)
+
+    return (
+        theta1_median = median(theta1),
+        theta2_median = median(theta2),
+        theta_diff_median = median(theta_diff),
+        tau_median = Int(round(median(tau))),
+        tau_map = mode(tau),
+        tau_q025 = quantile(tau, 0.025),
+        tau_q975 = quantile(tau, 0.975),
+        p_positive_effect = mean(theta_diff .> 0),
+        p_large_effect = mean(theta_diff .> min_effect),
+        p_tau_near_truth = p_tau_near_truth,
+        accepted_rate = posterior.accepted_rate,
+    )
+end
+
+"""
+    is_detected(summary, analysis_day; ...)
+
+Decision rule for online detection.
+
+The current MCMC assumes a changepoint exists, so we should not declare a
+change just because it returns a tau. This rule requires:
+
+  1. posterior support for a practically meaningful increase in theta,
+  2. a posterior median increase above the minimum effect size,
+  3. a changepoint estimate that is not pinned to the newest data.
+
+The guard band helps avoid saying "change" when the posterior is simply using
+the last few observations as the best available tau.
+"""
+function is_detected(
+    summary,
+    analysis_day::Int;
+    min_effect::Float64=0.025,
+    p_effect_threshold::Float64=0.80,
+    guard_days::Int=4,
+)
+    if ismissing(summary.theta_diff_median) || ismissing(summary.tau_median)
+        return false
+    end
+
+    return summary.theta_diff_median >= min_effect &&
+           summary.p_large_effect >= p_effect_threshold &&
+           summary.tau_median <= analysis_day - guard_days
+end
+
+"""
+    online_changepoint_detection(X_obs; ...)
+
+Run the existing changepoint MCMC repeatedly as data accumulate. For example,
+with `breaks=2` and `analysis_every=10`, analyses are run after every five
+dust observations.
+"""
+function online_changepoint_detection(
+    X_obs::AbstractVector{<:Integer};
+    N::Int,
+    Tmax::Int,
+    xi::Float64=log(2) / 7,
+    breaks::Int=2,
+    analysis_every::Int=10,
+    min_analysis_day::Int=20,
+    true_t_star::Union{Nothing,Int}=nothing,
+    tolerance::Int=2,
+    n_iter::Int=3000,
+    burn_in::Int=500,
+    thin::Int=1,
+    prop_sd::NamedTuple=(theta1=0.05, theta2=0.05, tau=2),
+    min_effect::Float64=0.025,
+    p_effect_threshold::Float64=0.80,
+    guard_days::Int=4,
+    verbose::Bool=false,
+)
+    analysis_days = collect(min_analysis_day:analysis_every:Tmax)
+    records = DataFrame()
+    first_detection_day = missing
+    first_detection_tau = missing
+
+    for analysis_day in analysis_days
+        n_obs = div(analysis_day, breaks)
+        if n_obs < 2 || n_obs > length(X_obs)
+            continue
+        end
+
+        elapsed = @elapsed posterior = changepoint_mcmc(
+            collect(X_obs[1:n_obs]);
+            N = N,
+            Tmax = analysis_day,
+            xi = xi,
+            breaks = breaks,
+            n_iter = n_iter,
+            burn_in = burn_in,
+            thin = thin,
+            prop_sd = prop_sd,
+        )
+
+        summary = posterior_summary(
+            posterior;
+            true_t_star = true_t_star,
+            tolerance = tolerance,
+            min_effect = min_effect,
+        )
+
+        detected = is_detected(
+            summary,
+            analysis_day;
+            min_effect = min_effect,
+            p_effect_threshold = p_effect_threshold,
+            guard_days = guard_days,
+        )
+
+        if detected && ismissing(first_detection_day)
+            first_detection_day = analysis_day
+            first_detection_tau = summary.tau_median
+        end
+
+        push!(records, (
+            analysis_day = analysis_day,
+            n_observations = n_obs,
+            detected = detected,
+            elapsed_seconds = elapsed,
+            theta1_median = summary.theta1_median,
+            theta2_median = summary.theta2_median,
+            theta_diff_median = summary.theta_diff_median,
+            tau_median = summary.tau_median,
+            tau_map = summary.tau_map,
+            tau_q025 = summary.tau_q025,
+            tau_q975 = summary.tau_q975,
+            p_positive_effect = summary.p_positive_effect,
+            p_large_effect = summary.p_large_effect,
+            p_tau_near_truth = summary.p_tau_near_truth,
+            accepted_rate = summary.accepted_rate,
+        ); cols=:union)
+
+        if verbose
+            println(
+                "analysis_day=", analysis_day,
+                ", detected=", detected,
+                ", tau_median=", summary.tau_median,
+                ", theta_diff_median=", round(summary.theta_diff_median; digits=3),
+                ", elapsed=", round(elapsed; digits=2), "s",
+            )
+        end
+    end
+
+    return (
+        records = records,
+        first_detection_day = first_detection_day,
+        first_detection_tau = first_detection_tau,
+    )
+end
+
+"""
+    run_one_replicate(rep; ...)
+
+Simulate one full outbreak/dust trajectory, then apply online changepoint
+detection to prefixes of the observed dust time series.
+"""
+function run_one_replicate(
+    rep::Int;
+    seed::Int=2026,
+    N::Int=1000,
+    Tmax::Int=60,
+    theta1::Float64=0.15,
+    theta2::Float64=0.25,
+    true_t_star::Int=45,
+    xi::Float64=log(2) / 7,
+    breaks::Int=2,
+    analysis_every::Int=10,
+    min_analysis_day::Int=20,
+    n_iter::Int=3000,
+    burn_in::Int=500,
+    thin::Int=1,
+    prop_sd::NamedTuple=(theta1=0.05, theta2=0.05, tau=2),
+    min_effect::Float64=0.025,
+    p_effect_threshold::Float64=0.80,
+    guard_days::Int=4,
+    tolerance::Int=2,
+    verbose::Bool=false,
+)
+    Random.seed!(seed + rep - 1)
+
+    sim_elapsed = @elapsed result = simulate_dust_observation(
+        N = N,
+        Tmax = Tmax,
+        theta1 = theta1,
+        theta2 = theta2,
+        t_star = true_t_star,
+        xi = xi,
+        breaks = breaks,
+    )
+
+    X_obs = result.observations.Dust
+
+    detection_elapsed = @elapsed detection = online_changepoint_detection(
+        X_obs;
+        N = N,
+        Tmax = Tmax,
+        xi = xi,
+        breaks = breaks,
+        analysis_every = analysis_every,
+        min_analysis_day = min_analysis_day,
+        true_t_star = true_t_star,
+        tolerance = tolerance,
+        n_iter = n_iter,
+        burn_in = burn_in,
+        thin = thin,
+        prop_sd = prop_sd,
+        min_effect = min_effect,
+        p_effect_threshold = p_effect_threshold,
+        guard_days = guard_days,
+        verbose = verbose,
+    )
+
+    interim = detection.records
+    interim.rep = fill(rep, nrow(interim))
+    interim.seed = fill(seed + rep - 1, nrow(interim))
+    interim.true_theta1 = fill(theta1, nrow(interim))
+    interim.true_theta2 = fill(theta2, nrow(interim))
+    interim.true_t_star = fill(true_t_star, nrow(interim))
+
+    detected = !ismissing(detection.first_detection_day)
+    detection_delay = detected ? detection.first_detection_day - true_t_star : missing
+    false_alarm = detected && detection.first_detection_day < true_t_star
+
+    summary = DataFrame([(
+        rep = rep,
+        seed = seed + rep - 1,
+        true_theta1 = theta1,
+        true_theta2 = theta2,
+        true_t_star = true_t_star,
+        detected = detected,
+        first_detection_day = detection.first_detection_day,
+        first_detection_tau = detection.first_detection_tau,
+        detection_delay = detection_delay,
+        false_alarm = false_alarm,
+        sim_elapsed_seconds = sim_elapsed,
+        detection_elapsed_seconds = detection_elapsed,
+        total_elapsed_seconds = sim_elapsed + detection_elapsed,
+    )])
+
+    return (summary = summary, interim = interim, observations = result.observations)
+end
+
+function performance_summary(
+    summaries::DataFrame;
+    n_reps::Int,
+    theta1::Float64,
+    theta2::Float64,
+    true_t_star::Int,
+    min_effect::Float64,
+    p_effect_threshold::Float64,
+    guard_days::Int,
+    analysis_every::Int,
+    min_analysis_day::Int,
+    started_at::DateTime,
+    total_elapsed::Float64,
+    completed::Bool,
+)
+    detection_rate = nrow(summaries) == 0 ? missing : mean(summaries.detected)
+    false_alarm_rate = nrow(summaries) == 0 ? missing : mean(summaries.false_alarm)
+    detected_delays = nrow(summaries) == 0 ? [] : collect(skipmissing(summaries.detection_delay))
+    median_delay = isempty(detected_delays) ? missing : median(detected_delays)
+    completed_reps = nrow(summaries)
+
+    return DataFrame([(
+        n_reps = n_reps,
+        completed_reps = completed_reps,
+        completed = completed,
+        true_theta1 = theta1,
+        true_theta2 = theta2,
+        true_t_star = true_t_star,
+        min_effect = min_effect,
+        p_effect_threshold = p_effect_threshold,
+        guard_days = guard_days,
+        analysis_every = analysis_every,
+        min_analysis_day = min_analysis_day,
+        detection_rate = detection_rate,
+        false_alarm_rate = false_alarm_rate,
+        median_detection_delay = median_delay,
+        started_at = started_at,
+        finished_at = now(),
+        total_elapsed_seconds = total_elapsed,
+        avg_elapsed_seconds_per_rep = completed_reps == 0 ? missing : total_elapsed / completed_reps,
+    )])
+end
+
+"""
+    simulation_study(; n_reps=50, theta1=0.15, theta2=0.25, true_t_star=45, ...)
+
+Run a simulation study and return summary and interim-analysis DataFrames.
+Use `theta1`, `theta2`, and `true_t_star` to define the data-generating
+scenario. 
+"""
+function simulation_study(;
+    n_reps::Int=50,
+    seed::Int=2026,
+    N::Int=1000,
+    Tmax::Int=60,
+    theta1::Float64=0.15,
+    theta2::Float64=0.25,
+    true_t_star::Int=45,
+    xi::Float64=log(2) / 7,
+    breaks::Int=2,
+    analysis_every::Int=10,
+    min_analysis_day::Int=20,
+    n_iter::Int=3000,
+    burn_in::Int=500,
+    thin::Int=1,
+    prop_sd::NamedTuple=(theta1=0.05, theta2=0.05, tau=2),
+    min_effect::Float64=0.025,
+    p_effect_threshold::Float64=0.80,
+    guard_days::Int=4,
+    tolerance::Int=2,
+    verbose::Bool=true,
+)
+  
+    started_at = now()
+    start_seconds = time()
+    summaries = DataFrame()
+    interims = DataFrame()
+    completed = false
+
+    try
+        for rep in 1:n_reps
+            if verbose
+                println("Starting replicate ", rep, "/", n_reps, " at ", Dates.format(now(), "HH:MM:SS"))
+            end
+
+            result = run_one_replicate(
+                rep;
+                seed = seed,
+                N = N,
+                Tmax = Tmax,
+                theta1 = theta1,
+                theta2 = theta2,
+                true_t_star = true_t_star,
+                xi = xi,
+                breaks = breaks,
+                analysis_every = analysis_every,
+                min_analysis_day = min_analysis_day,
+                n_iter = n_iter,
+                burn_in = burn_in,
+                thin = thin,
+                prop_sd = prop_sd,
+                min_effect = min_effect,
+                p_effect_threshold = p_effect_threshold,
+                guard_days = guard_days,
+                tolerance = tolerance,
+                verbose = false,
+            )
+
+            append!(summaries, result.summary; cols=:union)
+            append!(interims, result.interim; cols=:union)
+
+            if verbose
+                first_day = result.summary.first_detection_day[1]
+                first_day_text = ismissing(first_day) ? "missing" : string(first_day)
+                println(
+                    "Finished replicate ", rep,
+                    ". detected=", result.summary.detected[1],
+                    ", first_detection_day=", first_day_text,
+                    ", total elapsed=", round(result.summary.total_elapsed_seconds[1]; digits=2), "s",
+                )
+            end
+        end
+
+        completed = true
+    catch err
+        if err isa InterruptException
+            println()
+            println("Simulation interrupted. Returning partial results for ", nrow(summaries), " completed replicates.")
+        else
+            rethrow(err)
+        end
+    end
+
+    total_elapsed = time() - start_seconds
+    performance = performance_summary(
+        summaries;
+        n_reps = n_reps,
+        theta1 = theta1,
+        theta2 = theta2,
+        true_t_star = true_t_star,
+        min_effect = min_effect,
+        p_effect_threshold = p_effect_threshold,
+        guard_days = guard_days,
+        analysis_every = analysis_every,
+        min_analysis_day = min_analysis_day,
+        started_at = started_at,
+        total_elapsed = total_elapsed,
+        completed = completed,
+    )
+
+    return (
+        performance = performance,
+        summaries = summaries,
+        interims = interims,
+    )
+end
+
+"""
+    scenario_grid(; theta1_values=[0.1], theta2_values=[0.15, 0.2, 0.25],
+                    true_t_star_values=[15, 30, 45], ...)
+
+Run `simulation_study` over every combination of the supplied theta and
+changepoint settings. Extra keyword arguments are passed to `simulation_study`.
+"""
+function scenario_grid(;
+    theta1_values::AbstractVector{<:Real}=[0.1],
+    theta2_values::AbstractVector{<:Real}=[0.15, 0.2, 0.25],
+    true_t_star_values::AbstractVector{<:Integer}=[15, 30, 45],
+    kwargs...,
+)
+    performances = DataFrame()
+    summaries = DataFrame()
+    interims = DataFrame()
+
+    for theta1 in theta1_values
+        for theta2 in theta2_values
+            for true_t_star in true_t_star_values
+                println(
+                    "Scenario: theta1=", theta1,
+                    ", theta2=", theta2,
+                    ", true_t_star=", true_t_star,
+                )
+
+                result = simulation_study(;
+                    theta1 = Float64(theta1),
+                    theta2 = Float64(theta2),
+                    true_t_star = Int(true_t_star),
+                    kwargs...,
+                )
+
+                append!(performances, result.performance; cols=:union)
+                append!(summaries, result.summaries; cols=:union)
+                append!(interims, result.interims; cols=:union)
+            end
+        end
+    end
+
+    return (
+        performance = performances,
+        summaries = summaries,
+        interims = interims,
+    )
+end
+
+"""
+    save_results_csv(results; output_dir=joinpath(@__DIR__, "..", "results"), prefix="simulation_results")
+
+Save the three DataFrames returned by `simulation_study` or `scenario_grid`
+to CSV files:
+
+  - `<prefix>_performance.csv`
+  - `<prefix>_summaries.csv`
+  - `<prefix>_interims.csv`
+"""
+function save_results_csv(
+    results;
+    output_dir::AbstractString=joinpath(@__DIR__, "..", "results"),
+    prefix::AbstractString="simulation_results",
+)
+    try
+        @eval import CSV
+    catch err
+        error("CSV.jl is required to save results. Run `using Pkg; Pkg.add(\"CSV\")`, then try again.")
+    end
+
+    output_dir = abspath(output_dir)
+    mkpath(output_dir)
+
+    paths = (
+        performance = joinpath(output_dir, string(prefix, "_performance.csv")),
+        summaries = joinpath(output_dir, string(prefix, "_summaries.csv")),
+        interims = joinpath(output_dir, string(prefix, "_interims.csv")),
+    )
+
+    CSV.write(paths.performance, results.performance)
+    CSV.write(paths.summaries, results.summaries)
+    CSV.write(paths.interims, results.interims)
+
+    println("Saved CSV files:")
+    println("  ", paths.performance)
+    println("  ", paths.summaries)
+    println("  ", paths.interims)
+
+    return paths
 end

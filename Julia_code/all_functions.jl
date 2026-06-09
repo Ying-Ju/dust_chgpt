@@ -66,7 +66,7 @@ function changepoint_mcmc(
         # quick rejects
         if θ1_prop ≤ 0 || θ1_prop ≥ 1 #|| θ2_prop ≥ 1 || θ2_prop ≤ 0
             continue
-        elseif θ2_prop ≤ θ1_prop || θ2_prop ≥ 1
+        elseif θ2_prop ≥ 1 # θ2_prop ≤ θ1_prop || 
             continue
         elseif τ_prop ≤ 0 || τ_prop ≥ Tmax 
             continue
@@ -389,7 +389,8 @@ and –Inf otherwise.
 
 function log_prior(θ1::Real, θ2::Real, τ::Real; Tmax::Real=60)
     # Support checks
-    if !(0.0 < θ1 < 1.0) || !(θ1 < θ2 < 1.0) || !(1 <= τ <= Tmax - 1)
+    #if !(0.0 < θ1 < 1.0) || !(θ1 < θ2 < 1.0) || !(1 <= τ <= Tmax - 1)
+    if !(0.0 < θ1 < 1.0) || !(0.0 < θ2 < 1.0) || !(1 <= τ <= Tmax - 1)
         return -Inf
     end
 

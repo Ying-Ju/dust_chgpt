@@ -660,7 +660,6 @@ function posterior_summary(
     posterior;
     true_t_star::Union{Nothing,Int}=nothing,
     tolerance::Int=2,
-    min_effect::Float64=0.025,
 )
     samples = posterior.samples
 
@@ -674,7 +673,6 @@ function posterior_summary(
             tau_q025 = missing,
             tau_q975 = missing,
             p_positive_effect = missing,
-            p_large_effect = missing,
             p_tau_near_truth = missing,
             accepted_rate = posterior.accepted_rate,
         )
@@ -697,7 +695,6 @@ function posterior_summary(
         tau_q025 = quantile(tau, 0.025),
         tau_q975 = quantile(tau, 0.975),
         p_positive_effect = mean(theta_diff .> 0),
-        p_large_effect = mean(theta_diff .> min_effect),
         p_tau_near_truth = p_tau_near_truth,
         accepted_rate = posterior.accepted_rate,
     )
@@ -709,28 +706,24 @@ end
 Decision rule for online detection.
 
 The current MCMC assumes a changepoint exists, so we should not declare a
-change just because it returns a tau. This rule requires:
+change just because it returns a tau. This rule declares a change when:
 
-  1. posterior support for a practically meaningful increase in theta,
-  2. a posterior median increase above the minimum effect size,
-  3. a changepoint estimate that is not pinned to the newest data.
+    Pr(theta2 > theta1 | data) > p_effect_threshold
 
-The guard band helps avoid saying "change" when the posterior is simply using
-the last few observations as the best available tau.
+and the posterior median changepoint is at least `guard_days` before the
+current analysis day.
 """
 function is_detected(
     summary,
     analysis_day::Int;
-    min_effect::Float64=0.025,
-    p_effect_threshold::Float64=0.80,
+    p_effect_threshold::Float64=0.70,
     guard_days::Int=4,
 )
-    if ismissing(summary.theta_diff_median) || ismissing(summary.tau_median)
+    if ismissing(summary.p_positive_effect) || ismissing(summary.tau_median)
         return false
     end
 
-    return summary.theta_diff_median >= min_effect &&
-           summary.p_large_effect >= p_effect_threshold &&
+    return summary.p_positive_effect > p_effect_threshold &&
            summary.tau_median <= analysis_day - guard_days
 end
 
@@ -755,9 +748,10 @@ function online_changepoint_detection(
     burn_in::Int=500,
     thin::Int=1,
     prop_sd::NamedTuple=(theta1=0.05, theta2=0.05, tau=2),
-    min_effect::Float64=0.025,
-    p_effect_threshold::Float64=0.80,
+    p_effect_threshold::Float64=0.70,
     guard_days::Int=4,
+    stop_after_detection::Bool=false,
+    track_timing::Bool=true,
     verbose::Bool=false,
 )
     analysis_days = collect(min_analysis_day:analysis_every:Tmax)
@@ -771,29 +765,42 @@ function online_changepoint_detection(
             continue
         end
 
-        elapsed = @elapsed posterior = changepoint_mcmc(
-            collect(X_obs[1:n_obs]);
-            N = N,
-            Tmax = analysis_day,
-            xi = xi,
-            breaks = breaks,
-            n_iter = n_iter,
-            burn_in = burn_in,
-            thin = thin,
-            prop_sd = prop_sd,
-        )
+        if track_timing
+            elapsed = @elapsed posterior = changepoint_mcmc(
+                collect(X_obs[1:n_obs]);
+                N = N,
+                Tmax = analysis_day,
+                xi = xi,
+                breaks = breaks,
+                n_iter = n_iter,
+                burn_in = burn_in,
+                thin = thin,
+                prop_sd = prop_sd,
+            )
+        else
+            elapsed = missing
+            posterior = changepoint_mcmc(
+                collect(X_obs[1:n_obs]);
+                N = N,
+                Tmax = analysis_day,
+                xi = xi,
+                breaks = breaks,
+                n_iter = n_iter,
+                burn_in = burn_in,
+                thin = thin,
+                prop_sd = prop_sd,
+            )
+        end
 
         summary = posterior_summary(
             posterior;
             true_t_star = true_t_star,
             tolerance = tolerance,
-            min_effect = min_effect,
         )
 
         detected = is_detected(
             summary,
             analysis_day;
-            min_effect = min_effect,
             p_effect_threshold = p_effect_threshold,
             guard_days = guard_days,
         )
@@ -816,19 +823,23 @@ function online_changepoint_detection(
             tau_q025 = summary.tau_q025,
             tau_q975 = summary.tau_q975,
             p_positive_effect = summary.p_positive_effect,
-            p_large_effect = summary.p_large_effect,
             p_tau_near_truth = summary.p_tau_near_truth,
             accepted_rate = summary.accepted_rate,
         ); cols=:union)
 
         if verbose
+            elapsed_text = ismissing(elapsed) ? "not tracked" : string(round(elapsed; digits=2), "s")
             println(
                 "analysis_day=", analysis_day,
                 ", detected=", detected,
                 ", tau_median=", summary.tau_median,
                 ", theta_diff_median=", round(summary.theta_diff_median; digits=3),
-                ", elapsed=", round(elapsed; digits=2), "s",
+                ", elapsed=", elapsed_text,
             )
+        end
+
+        if detected && stop_after_detection
+            break
         end
     end
 
@@ -861,45 +872,84 @@ function run_one_replicate(
     burn_in::Int=500,
     thin::Int=1,
     prop_sd::NamedTuple=(theta1=0.05, theta2=0.05, tau=2),
-    min_effect::Float64=0.025,
-    p_effect_threshold::Float64=0.80,
+    p_effect_threshold::Float64=0.70,
     guard_days::Int=4,
+    stop_after_detection::Bool=false,
+    track_timing::Bool=true,
     tolerance::Int=2,
     verbose::Bool=false,
 )
     Random.seed!(seed + rep - 1)
 
-    sim_elapsed = @elapsed result = simulate_dust_observation(
-        N = N,
-        Tmax = Tmax,
-        theta1 = theta1,
-        theta2 = theta2,
-        t_star = true_t_star,
-        xi = xi,
-        breaks = breaks,
-    )
+    if track_timing
+        sim_elapsed = @elapsed result = simulate_dust_observation(
+            N = N,
+            Tmax = Tmax,
+            theta1 = theta1,
+            theta2 = theta2,
+            t_star = true_t_star,
+            xi = xi,
+            breaks = breaks,
+        )
+    else
+        sim_elapsed = missing
+        result = simulate_dust_observation(
+            N = N,
+            Tmax = Tmax,
+            theta1 = theta1,
+            theta2 = theta2,
+            t_star = true_t_star,
+            xi = xi,
+            breaks = breaks,
+        )
+    end
 
     X_obs = result.observations.Dust
 
-    detection_elapsed = @elapsed detection = online_changepoint_detection(
-        X_obs;
-        N = N,
-        Tmax = Tmax,
-        xi = xi,
-        breaks = breaks,
-        analysis_every = analysis_every,
-        min_analysis_day = min_analysis_day,
-        true_t_star = true_t_star,
-        tolerance = tolerance,
-        n_iter = n_iter,
-        burn_in = burn_in,
-        thin = thin,
-        prop_sd = prop_sd,
-        min_effect = min_effect,
-        p_effect_threshold = p_effect_threshold,
-        guard_days = guard_days,
-        verbose = verbose,
-    )
+    if track_timing
+        detection_elapsed = @elapsed detection = online_changepoint_detection(
+            X_obs;
+            N = N,
+            Tmax = Tmax,
+            xi = xi,
+            breaks = breaks,
+            analysis_every = analysis_every,
+            min_analysis_day = min_analysis_day,
+            true_t_star = true_t_star,
+            tolerance = tolerance,
+            n_iter = n_iter,
+            burn_in = burn_in,
+            thin = thin,
+            prop_sd = prop_sd,
+            p_effect_threshold = p_effect_threshold,
+            guard_days = guard_days,
+            stop_after_detection = stop_after_detection,
+            track_timing = track_timing,
+            verbose = verbose,
+        )
+    else
+        detection_elapsed = missing
+        detection = online_changepoint_detection(
+            X_obs;
+            N = N,
+            Tmax = Tmax,
+            xi = xi,
+            breaks = breaks,
+            analysis_every = analysis_every,
+            min_analysis_day = min_analysis_day,
+            true_t_star = true_t_star,
+            tolerance = tolerance,
+            n_iter = n_iter,
+            burn_in = burn_in,
+            thin = thin,
+            prop_sd = prop_sd,
+            p_effect_threshold = p_effect_threshold,
+            guard_days = guard_days,
+            stop_after_detection = stop_after_detection,
+            track_timing = track_timing,
+            verbose = verbose,
+        )
+    end
 
     interim = detection.records
     interim.rep = fill(rep, nrow(interim))
@@ -925,7 +975,7 @@ function run_one_replicate(
         false_alarm = false_alarm,
         sim_elapsed_seconds = sim_elapsed,
         detection_elapsed_seconds = detection_elapsed,
-        total_elapsed_seconds = sim_elapsed + detection_elapsed,
+        total_elapsed_seconds = track_timing ? sim_elapsed + detection_elapsed : missing,
     )])
 
     return (summary = summary, interim = interim, observations = result.observations)
@@ -937,11 +987,12 @@ function performance_summary(
     theta1::Float64,
     theta2::Float64,
     true_t_star::Int,
-    min_effect::Float64,
     p_effect_threshold::Float64,
     guard_days::Int,
     analysis_every::Int,
     min_analysis_day::Int,
+    stop_after_detection::Bool,
+    track_timing::Bool,
     started_at::DateTime,
     total_elapsed::Float64,
     completed::Bool,
@@ -959,11 +1010,12 @@ function performance_summary(
         true_theta1 = theta1,
         true_theta2 = theta2,
         true_t_star = true_t_star,
-        min_effect = min_effect,
         p_effect_threshold = p_effect_threshold,
         guard_days = guard_days,
         analysis_every = analysis_every,
         min_analysis_day = min_analysis_day,
+        stop_after_detection = stop_after_detection,
+        track_timing = track_timing,
         detection_rate = detection_rate,
         false_alarm_rate = false_alarm_rate,
         median_detection_delay = median_delay,
@@ -997,9 +1049,10 @@ function simulation_study(;
     burn_in::Int=500,
     thin::Int=1,
     prop_sd::NamedTuple=(theta1=0.05, theta2=0.05, tau=2),
-    min_effect::Float64=0.025,
-    p_effect_threshold::Float64=0.80,
+    p_effect_threshold::Float64=0.70,
     guard_days::Int=4,
+    stop_after_detection::Bool=false,
+    track_timing::Bool=true,
     tolerance::Int=2,
     verbose::Bool=true,
 )
@@ -1032,9 +1085,10 @@ function simulation_study(;
                 burn_in = burn_in,
                 thin = thin,
                 prop_sd = prop_sd,
-                min_effect = min_effect,
                 p_effect_threshold = p_effect_threshold,
                 guard_days = guard_days,
+                stop_after_detection = stop_after_detection,
+                track_timing = track_timing,
                 tolerance = tolerance,
                 verbose = false,
             )
@@ -1049,7 +1103,6 @@ function simulation_study(;
                     "Finished replicate ", rep,
                     ". detected=", result.summary.detected[1],
                     ", first_detection_day=", first_day_text,
-                    ", total elapsed=", round(result.summary.total_elapsed_seconds[1]; digits=2), "s",
                 )
             end
         end
@@ -1071,11 +1124,12 @@ function simulation_study(;
         theta1 = theta1,
         theta2 = theta2,
         true_t_star = true_t_star,
-        min_effect = min_effect,
         p_effect_threshold = p_effect_threshold,
         guard_days = guard_days,
         analysis_every = analysis_every,
         min_analysis_day = min_analysis_day,
+        stop_after_detection = stop_after_detection,
+        track_timing = track_timing,
         started_at = started_at,
         total_elapsed = total_elapsed,
         completed = completed,

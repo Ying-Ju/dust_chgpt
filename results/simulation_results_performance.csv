@@ -1,2 +1,2 @@
-n_reps,completed_reps,completed,true_theta1,true_theta2,true_t_star,min_effect,p_effect_threshold,guard_days,analysis_every,min_analysis_day,detection_rate,false_alarm_rate,median_detection_delay,started_at,finished_at,total_elapsed_seconds,avg_elapsed_seconds_per_rep
-10,10,true,0.15,0.25,30,0.03,0.7,4,10,20,1.0,0.1,20.0,2026-06-09T14:34:03.747,2026-06-09T16:44:41.217,7837.47000002861,783.747000002861
+n_reps,completed_reps,completed,true_theta1,true_theta2,true_t_star,p_effect_threshold,guard_days,analysis_every,min_analysis_day,stop_after_detection,track_timing,detection_rate,false_alarm_rate,median_detection_delay,started_at,finished_at,total_elapsed_seconds,avg_elapsed_seconds_per_rep
+5,5,true,0.15,0.25,30,0.7,4,10,20,true,false,1.0,0.2,10.0,2026-06-17T16:18:51.491,2026-06-17T16:44:31.957,1540.3630001544952,308.072600030899

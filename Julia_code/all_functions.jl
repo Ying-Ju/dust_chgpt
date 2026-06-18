@@ -961,6 +961,9 @@ function run_one_replicate(
     detected = !ismissing(detection.first_detection_day)
     detection_delay = detected ? detection.first_detection_day - true_t_star : missing
     false_alarm = detected && detection.first_detection_day < true_t_star
+    tau_error = detected ? detection.first_detection_tau - true_t_star : missing
+    abs_tau_error = detected ? abs(tau_error) : missing
+    tau_within_tolerance = detected ? abs_tau_error <= tolerance : missing
 
     summary = DataFrame([(
         rep = rep,
@@ -973,6 +976,9 @@ function run_one_replicate(
         first_detection_tau = detection.first_detection_tau,
         detection_delay = detection_delay,
         false_alarm = false_alarm,
+        tau_error = tau_error,
+        abs_tau_error = abs_tau_error,
+        tau_within_tolerance = tau_within_tolerance,
         sim_elapsed_seconds = sim_elapsed,
         detection_elapsed_seconds = detection_elapsed,
         total_elapsed_seconds = track_timing ? sim_elapsed + detection_elapsed : missing,
@@ -993,6 +999,7 @@ function performance_summary(
     min_analysis_day::Int,
     stop_after_detection::Bool,
     track_timing::Bool,
+    tolerance::Int,
     started_at::DateTime,
     total_elapsed::Float64,
     completed::Bool,
@@ -1001,6 +1008,10 @@ function performance_summary(
     false_alarm_rate = nrow(summaries) == 0 ? missing : mean(summaries.false_alarm)
     detected_delays = nrow(summaries) == 0 ? [] : collect(skipmissing(summaries.detection_delay))
     median_delay = isempty(detected_delays) ? missing : median(detected_delays)
+    abs_tau_errors = nrow(summaries) == 0 ? [] : collect(skipmissing(summaries.abs_tau_error))
+    median_abs_tau_error = isempty(abs_tau_errors) ? missing : median(abs_tau_errors)
+    tau_within_values = nrow(summaries) == 0 ? [] : collect(skipmissing(summaries.tau_within_tolerance))
+    tau_within_tolerance_rate = isempty(tau_within_values) ? missing : mean(tau_within_values)
     completed_reps = nrow(summaries)
 
     return DataFrame([(
@@ -1016,9 +1027,12 @@ function performance_summary(
         min_analysis_day = min_analysis_day,
         stop_after_detection = stop_after_detection,
         track_timing = track_timing,
+        tau_tolerance = tolerance,
         detection_rate = detection_rate,
         false_alarm_rate = false_alarm_rate,
         median_detection_delay = median_delay,
+        median_abs_tau_error = median_abs_tau_error,
+        tau_within_tolerance_rate = tau_within_tolerance_rate,
         started_at = started_at,
         finished_at = now(),
         total_elapsed_seconds = total_elapsed,
@@ -1130,6 +1144,7 @@ function simulation_study(;
         min_analysis_day = min_analysis_day,
         stop_after_detection = stop_after_detection,
         track_timing = track_timing,
+        tolerance = tolerance,
         started_at = started_at,
         total_elapsed = total_elapsed,
         completed = completed,

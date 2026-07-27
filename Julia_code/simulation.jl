@@ -23,15 +23,15 @@ total_elapsed_seconds = @elapsed begin
         burn_in = 500,
         thin = 1,
         prop_sd = (theta1=0.05, theta2=0.05, tau=3),
-        p_effect_threshold = 0.80,
-        guard_days = 4,
+        p_effect_threshold = 0.70,
+        guard_days = 6,
         stop_after_detection = true,
         track_timing = false,
         tolerance = 3,
         verbose = false,
     )
 
-    save_results_csv(results)
+    save_results_csv(results; prefix = "pilot_p070_guard6")
 end
 
 println("Total simulation.jl elapsed time: ", round(total_elapsed_seconds; digits=2), " seconds")

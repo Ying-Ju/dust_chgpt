@@ -1040,6 +1040,138 @@ function performance_summary(
     )])
 end
 
+function summarize_detection_replay(
+    interims::DataFrame;
+    p_effect_threshold::Float64,
+    guard_days::Int,
+    tolerance::Int=3,
+)
+    summaries = DataFrame()
+
+    for group in groupby(interims, :rep)
+        rows = sort(group, :analysis_day)
+        first_detection_day = missing
+        first_detection_tau = missing
+
+        for row in eachrow(rows)
+            has_signal = !ismissing(row.p_positive_effect) &&
+                         !ismissing(row.tau_median) &&
+                         row.p_positive_effect > p_effect_threshold &&
+                         row.tau_median <= row.analysis_day - guard_days
+
+            if has_signal
+                first_detection_day = row.analysis_day
+                first_detection_tau = row.tau_median
+                break
+            end
+        end
+
+        first_row = rows[1, :]
+        true_t_star = first_row.true_t_star
+        detected = !ismissing(first_detection_day)
+        detection_delay = detected ? first_detection_day - true_t_star : missing
+        false_alarm = detected && first_detection_day < true_t_star
+        tau_error = detected ? first_detection_tau - true_t_star : missing
+        abs_tau_error = detected ? abs(tau_error) : missing
+        tau_within_tolerance = detected ? abs_tau_error <= tolerance : missing
+
+        seed = :seed in propertynames(rows) ? first_row.seed : missing
+
+        push!(summaries, (
+            rep = first_row.rep,
+            seed = seed,
+            true_theta1 = first_row.true_theta1,
+            true_theta2 = first_row.true_theta2,
+            true_t_star = true_t_star,
+            p_effect_threshold = p_effect_threshold,
+            guard_days = guard_days,
+            detected = detected,
+            first_detection_day = first_detection_day,
+            first_detection_tau = first_detection_tau,
+            detection_delay = detection_delay,
+            false_alarm = false_alarm,
+            tau_error = tau_error,
+            abs_tau_error = abs_tau_error,
+            tau_within_tolerance = tau_within_tolerance,
+        ); cols=:union)
+    end
+
+    return summaries
+end
+
+function summarize_detection_performance(
+    summaries::DataFrame;
+    p_effect_threshold::Float64,
+    guard_days::Int,
+    tolerance::Int=3,
+)
+    n_reps = nrow(summaries)
+    detection_rate = n_reps == 0 ? missing : mean(summaries.detected)
+    false_alarm_rate = n_reps == 0 ? missing : mean(summaries.false_alarm)
+    detected_delays = n_reps == 0 ? [] : collect(skipmissing(summaries.detection_delay))
+    abs_tau_errors = n_reps == 0 ? [] : collect(skipmissing(summaries.abs_tau_error))
+    tau_within_values = n_reps == 0 ? [] : collect(skipmissing(summaries.tau_within_tolerance))
+
+    return DataFrame([(
+        n_reps = n_reps,
+        true_theta1 = n_reps == 0 ? missing : summaries.true_theta1[1],
+        true_theta2 = n_reps == 0 ? missing : summaries.true_theta2[1],
+        true_t_star = n_reps == 0 ? missing : summaries.true_t_star[1],
+        p_effect_threshold = p_effect_threshold,
+        guard_days = guard_days,
+        tau_tolerance = tolerance,
+        detection_rate = detection_rate,
+        false_alarm_rate = false_alarm_rate,
+        median_detection_delay = isempty(detected_delays) ? missing : median(detected_delays),
+        median_abs_tau_error = isempty(abs_tau_errors) ? missing : median(abs_tau_errors),
+        tau_within_tolerance_rate = isempty(tau_within_values) ? missing : mean(tau_within_values),
+    )])
+end
+
+"""
+    tuning_grid_from_interims(interims; ...)
+
+Replay detection decisions from a full interim-analysis table. Use this after
+running `simulation_study(..., stop_after_detection=false)` once. The MCMC
+results are reused, so different `p_effect_threshold` and `guard_days` values
+can be compared without rerunning the simulation.
+"""
+function tuning_grid_from_interims(
+    interims::DataFrame;
+    p_effect_thresholds = collect(0.60:0.05:0.90),
+    guard_days_values = [4, 5, 6],
+    tolerance::Int=3,
+)
+    performances = DataFrame()
+    summaries = DataFrame()
+
+    for p_effect_threshold in p_effect_thresholds
+        for guard_days in guard_days_values
+            replay = summarize_detection_replay(
+                interims;
+                p_effect_threshold = Float64(p_effect_threshold),
+                guard_days = Int(guard_days),
+                tolerance = tolerance,
+            )
+
+            perf = summarize_detection_performance(
+                replay;
+                p_effect_threshold = Float64(p_effect_threshold),
+                guard_days = Int(guard_days),
+                tolerance = tolerance,
+            )
+
+            append!(performances, perf; cols=:union)
+            append!(summaries, replay; cols=:union)
+        end
+    end
+
+    return (
+        performance = performances,
+        summaries = summaries,
+    )
+end
+
 """
     simulation_study(; n_reps=50, theta1=0.15, theta2=0.25, true_t_star=45, ...)
 

@@ -13,14 +13,14 @@ include("all_functions.jl")
 
 total_elapsed_seconds = @elapsed begin
     results = simulation_study(
-        n_reps = 20,
+        n_reps = 50,
         theta1 = 0.15,
         theta2 = 0.25,
         true_t_star = 30,
         analysis_every = 10,
         min_analysis_day = 20,
-        n_iter = 3000,
-        burn_in = 500,
+        n_iter = 5000,
+        burn_in = 1000,
         thin = 1,
         prop_sd = (theta1=0.05, theta2=0.05, tau=3),
         p_effect_threshold = 0.70,
@@ -31,12 +31,12 @@ total_elapsed_seconds = @elapsed begin
         verbose = false,
     )
 
-    save_results_csv(results; prefix = "pilot_p070_guard6")
+    save_results_csv(results; prefix = "full_p070_guard6")
 end
+
 
 println("Total simulation.jl elapsed time: ", round(total_elapsed_seconds; digits=2), " seconds")
 println("Total simulation.jl elapsed time: ", round(total_elapsed_seconds / 60; digits=2), " minutes")
-
 
 results.performance[:, [
     :n_reps,
@@ -48,4 +48,6 @@ results.performance[:, [
     :median_detection_delay,
     :median_abs_tau_error,
     :tau_within_tolerance_rate,
-]]
+ ]]
+
+

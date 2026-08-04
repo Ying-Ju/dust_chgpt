@@ -1,2 +1,0 @@
-n_reps,completed_reps,completed,true_theta1,true_theta2,true_t_star,p_effect_threshold,guard_days,analysis_every,min_analysis_day,stop_after_detection,track_timing,tau_tolerance,detection_rate,false_alarm_rate,median_detection_delay,median_abs_tau_error,tau_within_tolerance_rate,started_at,finished_at,total_elapsed_seconds,avg_elapsed_seconds_per_rep
-20,20,true,0.15,0.25,30,0.8,6,10,20,true,false,3,0.95,0.0,20.0,5.0,0.21052631578947367,2026-06-18T16:13:46.101,2026-06-18T16:52:06.153,2300.0520000457764,115.00260000228882

@@ -138,7 +138,7 @@ end
 
 theta1 = 0.10
 theta2 = 0.15
-true_t_star = 15
+true_t_star = 45
 n_reps = 1000
 n_iter = 5000
 burn_in = 1000

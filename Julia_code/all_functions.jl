@@ -1377,3 +1377,408 @@ function save_results_csv(
 
     return paths
 end
+
+const DEFAULT_ANALYSIS_OUTPUT_PREFIX = "final_n1000_p070_guard6_tol3"
+const DEFAULT_ANALYSIS_FILE_PATTERN = r"theta1_010_theta2_(\d+)_tau(\d+)_n1000_iter5000_burn1000_p070_guard6_tol3_(performance|summaries)\.csv$"
+
+function scenario_label(theta2, true_t_star)
+    theta2_text = string(Char(0x03b8), Char(0x2082))
+    tau_text = string(Char(0x03c4))
+    return @sprintf("%s=%.2f, %s=%d", theta2_text, theta2, tau_text, true_t_star)
+end
+
+function rate_se(rate, n)
+    if ismissing(rate) || ismissing(n) || n <= 0
+        return missing
+    end
+    return sqrt(rate * (1 - rate) / n)
+end
+
+function ci_lower(rate, se)
+    if ismissing(rate) || ismissing(se)
+        return missing
+    end
+    return max(0.0, rate - 1.96 * se)
+end
+
+function ci_upper(rate, se)
+    if ismissing(rate) || ismissing(se)
+        return missing
+    end
+    return min(1.0, rate + 1.96 * se)
+end
+
+function read_matching_csvs(
+    kind::String;
+    results_dir::AbstractString=joinpath(@__DIR__, "..", "results"),
+    file_pattern::Regex=DEFAULT_ANALYSIS_FILE_PATTERN,
+)
+    results_dir = abspath(results_dir)
+    files = filter(readdir(results_dir; join=true)) do path
+        m = match(file_pattern, basename(path))
+        m !== nothing && m.captures[3] == kind
+    end
+
+    if isempty(files)
+        error("No $(kind) files found in $(results_dir)")
+    end
+
+    rows = DataFrame()
+    for file in files
+        df = CSV.read(file, DataFrame)
+        df.source_file = fill(basename(file), nrow(df))
+        append!(rows, df; cols=:union)
+    end
+
+    sort!(rows, [:true_theta2, :true_t_star])
+    return rows
+end
+
+function add_performance_ci!(performance::DataFrame)
+    performance.detected_count = round.(Int, performance.detection_rate .* performance.n_reps)
+    performance.false_alarm_count = round.(Int, performance.false_alarm_rate .* performance.n_reps)
+    performance.tau_within_count = round.(Int, performance.tau_within_tolerance_rate .* performance.detected_count)
+
+    performance.detection_rate_se = rate_se.(performance.detection_rate, performance.n_reps)
+    performance.detection_rate_ci_lower = ci_lower.(performance.detection_rate, performance.detection_rate_se)
+    performance.detection_rate_ci_upper = ci_upper.(performance.detection_rate, performance.detection_rate_se)
+
+    performance.false_alarm_rate_se = rate_se.(performance.false_alarm_rate, performance.n_reps)
+    performance.false_alarm_rate_ci_lower = ci_lower.(performance.false_alarm_rate, performance.false_alarm_rate_se)
+    performance.false_alarm_rate_ci_upper = ci_upper.(performance.false_alarm_rate, performance.false_alarm_rate_se)
+
+    performance.tau_within_tolerance_rate_se = rate_se.(performance.tau_within_tolerance_rate, performance.detected_count)
+    performance.tau_within_tolerance_rate_ci_lower = ci_lower.(performance.tau_within_tolerance_rate, performance.tau_within_tolerance_rate_se)
+    performance.tau_within_tolerance_rate_ci_upper = ci_upper.(performance.tau_within_tolerance_rate, performance.tau_within_tolerance_rate_se)
+
+    performance.scenario = scenario_label.(performance.true_theta2, performance.true_t_star)
+    return performance
+end
+
+function add_summary_helpers!(summaries::DataFrame)
+    theta2_text = string(Char(0x03b8), Char(0x2082))
+    tau_text = string(Char(0x03c4))
+    summaries.scenario = scenario_label.(summaries.true_theta2, summaries.true_t_star)
+    summaries.theta2_label = string.(theta2_text, "=", summaries.true_theta2)
+    summaries.t_star_label = string.(tau_text, "=", summaries.true_t_star)
+    return summaries
+end
+
+function load_analysis_data(;
+    results_dir::AbstractString=joinpath(@__DIR__, "..", "results"),
+    file_pattern::Regex=DEFAULT_ANALYSIS_FILE_PATTERN,
+)
+    performance = read_matching_csvs("performance"; results_dir=results_dir, file_pattern=file_pattern)
+    summaries = read_matching_csvs("summaries"; results_dir=results_dir, file_pattern=file_pattern)
+
+    add_performance_ci!(performance)
+    add_summary_helpers!(summaries)
+
+    return (
+        performance = performance,
+        summaries = summaries,
+    )
+end
+
+function save_combined_tables(
+    performance::DataFrame,
+    summaries::DataFrame;
+    results_dir::AbstractString=joinpath(@__DIR__, "..", "results"),
+    output_prefix::AbstractString=DEFAULT_ANALYSIS_OUTPUT_PREFIX,
+)
+    results_dir = abspath(results_dir)
+    combined_performance_path = joinpath(results_dir, "$(output_prefix)_combined_performance_with_mc_ci.csv")
+    combined_summaries_path = joinpath(results_dir, "$(output_prefix)_combined_summaries.csv")
+    table_path = joinpath(results_dir, "$(output_prefix)_table1_summary.csv")
+
+    CSV.write(combined_performance_path, performance)
+    CSV.write(combined_summaries_path, summaries)
+
+    table = select(
+        performance,
+        :true_theta1,
+        :true_theta2,
+        :true_t_star,
+        :n_reps,
+        :detected_count,
+        :detection_rate,
+        :detection_rate_se,
+        :detection_rate_ci_lower,
+        :detection_rate_ci_upper,
+        :false_alarm_count,
+        :false_alarm_rate,
+        :false_alarm_rate_se,
+        :false_alarm_rate_ci_lower,
+        :false_alarm_rate_ci_upper,
+        :median_detection_delay,
+        :median_abs_tau_error,
+        :tau_within_count,
+        :tau_within_tolerance_rate,
+        :tau_within_tolerance_rate_se,
+        :tau_within_tolerance_rate_ci_lower,
+        :tau_within_tolerance_rate_ci_upper,
+    )
+    CSV.write(table_path, table)
+
+    return (
+        combined_performance = combined_performance_path,
+        combined_summaries = combined_summaries_path,
+        table1 = table_path,
+    )
+end
+
+function save_rate_figures(
+    performance::DataFrame;
+    results_dir::AbstractString=joinpath(@__DIR__, "..", "results"),
+    output_prefix::AbstractString=DEFAULT_ANALYSIS_OUTPUT_PREFIX,
+    show_ci::Bool=false,
+)
+    @eval import Measures
+    theta2_title = string(Char(0x03b8), Char(0x2082))
+    tau_title = string(Char(0x03c4))
+    true_tau_label = string("True ", tau_title)
+    theta2_values = sort(unique(performance.true_theta2))
+    series_colors = [:dodgerblue3, :orangered2, :forestgreen, :purple3, :black]
+
+    default(
+        framestyle = :box,
+        legend = false,
+        linewidth = 2,
+        markersize = 5,
+        dpi = 300,
+        grid = true,
+        left_margin = 10 * Measures.mm,
+        right_margin = 5 * Measures.mm,
+        bottom_margin = 12 * Measures.mm,
+        top_margin = 5 * Measures.mm,
+    )
+
+    function rate_panel(y_col::Symbol, lower_col::Symbol, upper_col::Symbol, ylabel::String, title::String)
+        panel = plot(
+            xlabel = true_tau_label,
+            ylabel = ylabel,
+            title = title,
+            legend = false,
+            ylim = (0, 1),
+        )
+
+        for (i, theta2) in enumerate(theta2_values)
+            rows = sort(performance[performance.true_theta2 .== theta2, :], :true_t_star)
+            x = rows.true_t_star
+            y = rows[!, y_col]
+
+            if show_ci
+                yerr = (
+                    y .- rows[!, lower_col],
+                    rows[!, upper_col] .- y,
+                )
+                plot!(
+                    panel,
+                    x,
+                    y;
+                    yerror = yerr,
+                    label = @sprintf("%.2f", theta2),
+                    color = series_colors[i],
+                    marker = :circle,
+                    linewidth = 2,
+                )
+            else
+                plot!(
+                    panel,
+                    x,
+                    y;
+                    label = @sprintf("%.2f", theta2),
+                    color = series_colors[i],
+                    marker = :circle,
+                    linewidth = 2,
+                )
+            end
+        end
+
+        return panel
+    end
+
+    p1 = rate_panel(
+        :detection_rate,
+        :detection_rate_ci_lower,
+        :detection_rate_ci_upper,
+        "Detection rate",
+        "Detection",
+    )
+
+    p2 = rate_panel(
+        :false_alarm_rate,
+        :false_alarm_rate_ci_lower,
+        :false_alarm_rate_ci_upper,
+        "False alarm rate",
+        "False alarms",
+    )
+
+    p3 = rate_panel(
+        :tau_within_tolerance_rate,
+        :tau_within_tolerance_rate_ci_lower,
+        :tau_within_tolerance_rate_ci_upper,
+        "Within tolerance rate",
+        "Tau accuracy",
+    )
+
+    legend_panel = plot(
+        framestyle = :none,
+        grid = false,
+        ticks = false,
+        legend = :bottom,
+        legendtitle = theta2_title,
+        foreground_color_legend = nothing,
+        background_color_legend = nothing,
+        legend_columns = length(theta2_values),
+        bottom_margin = 0 * Measures.mm,
+        top_margin = 0 * Measures.mm,
+    )
+    for (i, theta2) in enumerate(theta2_values)
+        plot!(
+            legend_panel,
+            [NaN],
+            [NaN];
+            label = @sprintf("%.2f", theta2),
+            color = series_colors[i],
+            marker = :circle,
+            linewidth = 2,
+        )
+    end
+
+    combined = plot(
+        p1,
+        p2,
+        p3,
+        legend_panel;
+        layout = @layout([a b c; d{0.12h}]),
+        size = (1800, 650),
+        margin = 6 * Measures.mm,
+    )
+    results_dir = abspath(results_dir)
+    ci_suffix = show_ci ? "_with_mc_ci" : ""
+    png_path = joinpath(results_dir, "$(output_prefix)_figure_rates_three_panel$(ci_suffix).png")
+    pdf_path = joinpath(results_dir, "$(output_prefix)_figure_rates_three_panel$(ci_suffix).pdf")
+    savefig(combined, png_path)
+    savefig(combined, pdf_path)
+
+    return (png = png_path, pdf = pdf_path)
+end
+
+function save_boxplots(
+    summaries::DataFrame;
+    results_dir::AbstractString=joinpath(@__DIR__, "..", "results"),
+    output_prefix::AbstractString=DEFAULT_ANALYSIS_OUTPUT_PREFIX,
+)
+    @eval import Measures
+    theta2_title = string(Char(0x03b8), Char(0x2082))
+    tau_title = string(Char(0x03c4))
+    scenario_x_label = string("Scenario (", theta2_title, ", true ", tau_title, ")")
+
+    detected = filter(:detected => ==(true), summaries)
+
+    delay_plot = @df detected boxplot(
+        :scenario,
+        :detection_delay;
+        xlabel = scenario_x_label,
+        ylabel = "Detection delay",
+        title = "Detection delay distribution",
+        xrotation = 30,
+        legend = false,
+        outliers = false,
+        size = (1400, 600),
+        dpi = 300,
+        left_margin = 14 * Measures.mm,
+        bottom_margin = 28 * Measures.mm,
+        right_margin = 6 * Measures.mm,
+        top_margin = 6 * Measures.mm,
+    )
+
+    tau_plot = @df detected boxplot(
+        :scenario,
+        :abs_tau_error;
+        xlabel = scenario_x_label,
+        ylabel = "Absolute tau error",
+        title = "Changepoint localization error",
+        xrotation = 30,
+        legend = false,
+        outliers = false,
+        size = (1400, 600),
+        dpi = 300,
+        left_margin = 14 * Measures.mm,
+        bottom_margin = 28 * Measures.mm,
+        right_margin = 6 * Measures.mm,
+        top_margin = 6 * Measures.mm,
+    )
+
+    results_dir = abspath(results_dir)
+    delay_png = joinpath(results_dir, "$(output_prefix)_boxplot_detection_delay.png")
+    delay_pdf = joinpath(results_dir, "$(output_prefix)_boxplot_detection_delay.pdf")
+    tau_png = joinpath(results_dir, "$(output_prefix)_boxplot_abs_tau_error.png")
+    tau_pdf = joinpath(results_dir, "$(output_prefix)_boxplot_abs_tau_error.pdf")
+
+    savefig(delay_plot, delay_png)
+    savefig(delay_plot, delay_pdf)
+    savefig(tau_plot, tau_png)
+    savefig(tau_plot, tau_pdf)
+
+    return (
+        detection_delay_png = delay_png,
+        detection_delay_pdf = delay_pdf,
+        abs_tau_error_png = tau_png,
+        abs_tau_error_pdf = tau_pdf,
+    )
+end
+
+function show_key_performance(performance::DataFrame)
+    show(select(
+        performance,
+        :true_theta2,
+        :true_t_star,
+        :detection_rate,
+        :detection_rate_se,
+        :false_alarm_rate,
+        :false_alarm_rate_se,
+        :median_detection_delay,
+        :median_abs_tau_error,
+        :tau_within_tolerance_rate,
+        :tau_within_tolerance_rate_se,
+    ); allcols = true)
+    println()
+end
+
+function run_all_analysis_outputs(;
+    results_dir::AbstractString=joinpath(@__DIR__, "..", "results"),
+    output_prefix::AbstractString=DEFAULT_ANALYSIS_OUTPUT_PREFIX,
+    file_pattern::Regex=DEFAULT_ANALYSIS_FILE_PATTERN,
+)
+    data = load_analysis_data(; results_dir=results_dir, file_pattern=file_pattern)
+    performance = data.performance
+    summaries = data.summaries
+
+    table_paths = save_combined_tables(performance, summaries; results_dir=results_dir, output_prefix=output_prefix)
+    rate_paths = save_rate_figures(performance; results_dir=results_dir, output_prefix=output_prefix)
+    boxplot_paths = save_boxplots(summaries; results_dir=results_dir, output_prefix=output_prefix)
+
+    println("Saved combined tables:")
+    println("  ", table_paths.combined_performance)
+    println("  ", table_paths.combined_summaries)
+    println("  ", table_paths.table1)
+
+    println("Saved figures:")
+    println("  ", rate_paths.png)
+    println("  ", rate_paths.pdf)
+    println("  ", boxplot_paths.detection_delay_png)
+    println("  ", boxplot_paths.detection_delay_pdf)
+    println("  ", boxplot_paths.abs_tau_error_png)
+    println("  ", boxplot_paths.abs_tau_error_pdf)
+
+    println()
+    show_key_performance(performance)
+
+    return (
+        performance = performance,
+        summaries = summaries,
+        paths = merge(table_paths, rate_paths, boxplot_paths),
+    )
+end

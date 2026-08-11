@@ -1455,6 +1455,46 @@ function add_performance_ci!(performance::DataFrame)
     return performance
 end
 
+function update_tau_within_tolerance!(
+    performance::DataFrame,
+    summaries::DataFrame;
+    tolerance::Int=5,
+)
+    allowmissing!(performance, [:tau_tolerance, :tau_within_count, :tau_within_tolerance_rate])
+
+    grouped = combine(
+        groupby(summaries, [:true_theta1, :true_theta2, :true_t_star]),
+        :abs_tau_error => (x -> begin
+            values = collect(skipmissing(x))
+            isempty(values) ? missing : sum(values .<= tolerance)
+        end) => :tau_within_count_new,
+        :abs_tau_error => (x -> begin
+            values = collect(skipmissing(x))
+            isempty(values) ? missing : mean(values .<= tolerance)
+        end) => :tau_within_tolerance_rate_new,
+    )
+
+    for row in eachrow(grouped)
+        idx = findfirst(
+            (performance.true_theta1 .== row.true_theta1) .&
+            (performance.true_theta2 .== row.true_theta2) .&
+            (performance.true_t_star .== row.true_t_star)
+        )
+
+        if idx !== nothing
+            performance.tau_tolerance[idx] = tolerance
+            performance.tau_within_count[idx] = row.tau_within_count_new
+            performance.tau_within_tolerance_rate[idx] = row.tau_within_tolerance_rate_new
+        end
+    end
+
+    performance.tau_within_tolerance_rate_se = rate_se.(performance.tau_within_tolerance_rate, performance.detected_count)
+    performance.tau_within_tolerance_rate_ci_lower = ci_lower.(performance.tau_within_tolerance_rate, performance.tau_within_tolerance_rate_se)
+    performance.tau_within_tolerance_rate_ci_upper = ci_upper.(performance.tau_within_tolerance_rate, performance.tau_within_tolerance_rate_se)
+
+    return performance
+end
+
 function add_summary_helpers!(summaries::DataFrame)
     theta2_text = string(Char(0x03b8), Char(0x2082))
     tau_text = string(Char(0x03c4))
@@ -1489,7 +1529,7 @@ function save_combined_tables(
     results_dir = abspath(results_dir)
     combined_performance_path = joinpath(results_dir, "$(output_prefix)_combined_performance_with_mc_ci.csv")
     combined_summaries_path = joinpath(results_dir, "$(output_prefix)_combined_summaries.csv")
-    table_path = joinpath(results_dir, "$(output_prefix)_table1_summary.csv")
+    table_path = joinpath(results_dir, "$(output_prefix)_table1_performance.csv")
 
     CSV.write(combined_performance_path, performance)
     CSV.write(combined_summaries_path, summaries)
@@ -1512,6 +1552,7 @@ function save_combined_tables(
         :false_alarm_rate_ci_upper,
         :median_detection_delay,
         :median_abs_tau_error,
+        :tau_tolerance,
         :tau_within_count,
         :tau_within_tolerance_rate,
         :tau_within_tolerance_rate_se,
@@ -1537,6 +1578,10 @@ function save_rate_figures(
     theta2_title = string(Char(0x03b8), Char(0x2082))
     tau_title = string(Char(0x03c4))
     true_tau_label = string("True ", tau_title)
+    plusminus = string(Char(0x00b1))
+    tau_tolerance = :tau_tolerance in propertynames(performance) ? first(skipmissing(performance.tau_tolerance)) : 3
+    tau_accuracy_ylabel = string("Within ", plusminus, tau_tolerance, " days rate")
+    tau_accuracy_title = string(tau_title, " accuracy")
     theta2_values = sort(unique(performance.true_theta2))
     series_colors = [:dodgerblue3, :orangered2, :forestgreen, :purple3, :black]
 
@@ -1544,10 +1589,15 @@ function save_rate_figures(
         framestyle = :box,
         legend = false,
         linewidth = 2,
-        markersize = 5,
+        markersize = 7,
         dpi = 300,
         grid = true,
-        left_margin = 10 * Measures.mm,
+        titlefontsize = 30,
+        guidefontsize = 24,
+        tickfontsize = 20,
+        legendfontsize = 20,
+        legendtitlefontsize = 24,
+        left_margin = 14 * Measures.mm,
         right_margin = 5 * Measures.mm,
         bottom_margin = 12 * Measures.mm,
         top_margin = 5 * Measures.mm,
@@ -1618,8 +1668,8 @@ function save_rate_figures(
         :tau_within_tolerance_rate,
         :tau_within_tolerance_rate_ci_lower,
         :tau_within_tolerance_rate_ci_upper,
-        "Within tolerance rate",
-        "Tau accuracy",
+        tau_accuracy_ylabel,
+        tau_accuracy_title,
     )
 
     legend_panel = plot(
@@ -1652,7 +1702,7 @@ function save_rate_figures(
         p3,
         legend_panel;
         layout = @layout([a b c; d{0.12h}]),
-        size = (1800, 650),
+        size = (2200, 800),
         margin = 6 * Measures.mm,
     )
     results_dir = abspath(results_dir)
@@ -1686,10 +1736,13 @@ function save_boxplots(
         xrotation = 30,
         legend = false,
         outliers = false,
-        size = (1400, 600),
+        size = (1800, 750),
         dpi = 300,
-        left_margin = 14 * Measures.mm,
-        bottom_margin = 28 * Measures.mm,
+        titlefontsize = 20,
+        guidefontsize = 18,
+        tickfontsize = 14,
+        left_margin = 18 * Measures.mm,
+        bottom_margin = 34 * Measures.mm,
         right_margin = 6 * Measures.mm,
         top_margin = 6 * Measures.mm,
     )
@@ -1703,10 +1756,13 @@ function save_boxplots(
         xrotation = 30,
         legend = false,
         outliers = false,
-        size = (1400, 600),
+        size = (1800, 750),
         dpi = 300,
-        left_margin = 14 * Measures.mm,
-        bottom_margin = 28 * Measures.mm,
+        titlefontsize = 20,
+        guidefontsize = 18,
+        tickfontsize = 14,
+        left_margin = 18 * Measures.mm,
+        bottom_margin = 34 * Measures.mm,
         right_margin = 6 * Measures.mm,
         top_margin = 6 * Measures.mm,
     )
